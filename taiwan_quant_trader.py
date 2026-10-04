@@ -722,34 +722,44 @@ def price_chart(df: pd.DataFrame, show_volume: bool = True):
         row=1, col=1,
     )
 
-    for ma in ["MA5", "MA20", "MA60", "MA120"]:
+    mobile = UI["mobile"]
+    ma_list = ["MA5", "MA20", "MA60"] if mobile else ["MA5", "MA20", "MA60", "MA120"]
+    for ma in ma_list:
         if ma in df:
-            fig.add_trace(go.Scatter(x=df["Date"], y=df[ma], mode="lines", name=ma), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df["Date"], y=df[ma], mode="lines", name=ma,
+                                     line=dict(width=1.2)), row=1, col=1)
 
-    fig.add_trace(go.Scatter(x=df["Date"], y=df["BB_UPPER"], mode="lines",
-                             name="布林上軌", line=dict(dash="dot")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df["Date"], y=df["BB_LOWER"], mode="lines",
-                             name="布林下軌", line=dict(dash="dot")), row=1, col=1)
+    if not mobile:
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["BB_UPPER"], mode="lines",
+                                 name="布林上軌", line=dict(dash="dot")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["BB_LOWER"], mode="lines",
+                                 name="布林下軌", line=dict(dash="dot")), row=1, col=1)
 
-    buys = df[df["BuySignal"]]
-    sells = df[df["SellSignal"]]
+    # 手機版只標「強力」訊號，並縮小標記，避免整張圖被三角形蓋住
+    buys = df[df["StrongBuy"]] if mobile else df[df["BuySignal"]]
+    sells = df[df["StrongSell"]] if mobile else df[df["SellSignal"]]
+    msize = 7 if mobile else 11
 
     if not buys.empty:
         fig.add_trace(
             go.Scatter(
-                x=buys["Date"], y=buys["Low"] * 0.98, mode="markers", name="買進訊號",
-                marker=dict(symbol="triangle-up", size=11, color="red"),
-                text=buys["SignalReason"],
-                hovertemplate="%{x}<br>買進<br>%{text}<extra></extra>",
+                x=buys["Date"], y=buys["Low"] * 0.98, mode="markers+text", name="買進訊號",
+                marker=dict(symbol="triangle-up", size=msize, color="red"),
+                text=["買進"] * len(buys), textposition="bottom center",
+                textfont=dict(color="red", size=11 if mobile else 12),
+                customdata=buys["SignalReason"],
+                hovertemplate="%{x}<br>買進<br>%{customdata}<extra></extra>",
             ), row=1, col=1)
 
     if not sells.empty:
         fig.add_trace(
             go.Scatter(
-                x=sells["Date"], y=sells["High"] * 1.02, mode="markers", name="賣出訊號",
-                marker=dict(symbol="triangle-down", size=11, color="green"),
-                text=sells["SignalReason"],
-                hovertemplate="%{x}<br>賣出<br>%{text}<extra></extra>",
+                x=sells["Date"], y=sells["High"] * 1.02, mode="markers+text", name="賣出訊號",
+                marker=dict(symbol="triangle-down", size=msize, color="green"),
+                text=["賣出"] * len(sells), textposition="top center",
+                textfont=dict(color="green", size=11 if mobile else 12),
+                customdata=sells["SignalReason"],
+                hovertemplate="%{x}<br>賣出<br>%{customdata}<extra></extra>",
             ), row=1, col=1)
 
     if show_volume:
@@ -760,9 +770,12 @@ def price_chart(df: pd.DataFrame, show_volume: bool = True):
         height=780, xaxis_rangeslider_visible=False, hovermode="x unified",
         margin=dict(l=20, r=20, t=50, b=20), legend=dict(orientation="h"),
     )
-    fig.update_yaxes(title_text="價格", row=1, col=1)
-    if show_volume:
-        fig.update_yaxes(title_text="成交量", row=2, col=1)
+    if mobile:
+        fig.update_layout(showlegend=False)
+    else:
+        fig.update_yaxes(title_text="價格", row=1, col=1)
+        if show_volume:
+            fig.update_yaxes(title_text="成交量", row=2, col=1)
     return fig
 
 
@@ -799,8 +812,6 @@ def indicator_chart(df: pd.DataFrame, indicator: str):
 def main() -> None:
     st.set_page_config(page_title="台股量化選股／買賣訊號系統", page_icon="📈", layout="wide",
                        initial_sidebar_state="collapsed")
-    st.title("📈 台股量化選股／買賣訊號系統")
-    st.caption("技術分析＋量價＋籌碼＋基本面＋回測＋風險管理｜不使用 yfinance")
 
     # ---------------- Sidebar ----------------
     with st.sidebar:
@@ -810,6 +821,7 @@ def main() -> None:
         stock_id = st.text_input("股票代號", value="2330").strip()
 
         source = st.selectbox("資料來源", ["FinMind", "twstock"], index=0 if FINMIND_OK else 1)
+        st.caption(f"套件狀態：FinMind {'✅' if FINMIND_OK else '❌未安裝'}｜twstock {'✅' if TWSTOCK_OK else '❌未安裝'}")
         token = st.text_input("FinMind Token（選填，可提高API額度）", type="password").strip()
 
         today = dt.date.today()
@@ -841,6 +853,12 @@ def main() -> None:
         if st.button("🔄 清除快取並重新讀取"):
             st.cache_data.clear()
             st.rerun()
+
+    if UI["mobile"]:
+        st.markdown("#### 📈 台股量化選股／買賣訊號")
+    else:
+        st.title("📈 台股量化選股／買賣訊號系統")
+        st.caption("技術分析＋量價＋籌碼＋基本面＋回測＋風險管理｜不使用 yfinance")
 
     # ---------------- Validate ----------------
     if not stock_id:
@@ -887,9 +905,16 @@ def main() -> None:
 
     # ---------------- Tab 1 ----------------
     with tab1:
-        show_chart(price_chart(df, show_volume=True))
+        span = st.radio("顯示區間", ["3個月", "6個月", "1年", "全部"],
+                        index=1 if UI["mobile"] else 3, horizontal=True, key="span_select")
+        n_days = {"3個月": 63, "6個月": 126, "1年": 252, "全部": len(df)}[span]
+        view = df.tail(n_days)
+
+        show_chart(price_chart(view, show_volume=True))
+        if UI["mobile"]:
+            st.caption("手機版圖上只標「強力買進／強力賣出」；完整訊號請看「歷史訊號」分頁。紅色「買進」、綠色「賣出」。")
         indicator = st.selectbox("技術指標", ["MACD", "KD", "RSI", "BIAS"], key="indicator_select")
-        show_chart(indicator_chart(df, indicator))
+        show_chart(indicator_chart(view, indicator))
 
     # ---------------- Tab 2 ----------------
     with tab2:
