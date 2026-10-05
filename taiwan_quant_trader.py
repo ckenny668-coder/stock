@@ -703,6 +703,137 @@ def backtest(
 # =========================================================
 # Charts
 # =========================================================
+# =========================================================
+# 趨勢評分：價量警示／箱型突破／11分制／RS／Minervini
+# （改寫自使用者的 yfinance + pandas_ta 腳本，不需額外套件）
+# =========================================================
+def pv_warnings(df: pd.DataFrame) -> pd.Series:
+    """逐日價量警示文字（向量化前置 + 逐列組字串）。"""
+    d = df.copy()
+    d["MA5w"] = d["Close"].rolling(5).mean()
+    d["MA20w"] = d["Close"].rolling(20).mean()
+    c1, c2 = d["Close"].shift(1), d["Close"].shift(2)
+    v1, v2 = d["Volume"].shift(1), d["Volume"].shift(2)
+
+    out = []
+    for i in range(len(d)):
+        r = d.iloc[i]
+        close, open_p, vol = r["Close"], r["Open"], r["Volume"]
+        ma5, ma20, pc, pv = r["MA5w"], r["MA20w"], c1.iloc[i], v1.iloc[i]
+        w = []
+        if pd.isna(pc) or pd.isna(pv) or pd.isna(ma5) or pd.isna(ma20):
+            out.append("")
+            continue
+        if close > ma20 and pc <= ma20:
+            w.append("突破 20 日線")
+        if close < ma5 and pc >= ma5:
+            w.append("跌破 5 日線，短線防線失守，建議減碼")
+
+        up, down = close > pc, close < pc
+        vup, vdn = vol > pv, vol < pv
+        red, black = close > open_p, close < open_p
+        if red and up:
+            w.append("價漲量增，注意是否突破箱型高點（正式表態）" if vup
+                     else "價漲量縮就難做，留意反彈／下影線" if vdn else "價漲量平")
+        elif black and up:
+            w.append("高檔震盪：外漲內跌、量增注意出貨風險" if vup
+                     else "高檔震盪：假陽線量縮，多頭獲利回吐")
+        elif down:
+            w.append("價跌量增就難做" if vup else "價跌量縮" if vdn else "價跌量平可能續跌")
+        else:
+            w.append("價平量增" if vup else "價平量縮，等待主力" if vdn else "價平量平")
+
+        p2, q2 = c2.iloc[i], v2.iloc[i]
+        if pd.notna(p2) and pd.notna(q2):
+            if close < p2 and vol > q2 and close < pc:
+                w.append("低價夾量，連續創新低")
+            if close > pc and vol < pv and close < p2:
+                w.append("小量上漲、大量拉回")
+        out.append("；".join(w))
+    return pd.Series(out, index=df.index)
+
+
+def benchmark_symbol(stock_id: str) -> tuple:
+    """回傳 (基準代號, 說明)。上市用 0050，上櫃用 006201（皆為 ETF，當大盤替身）。"""
+    market = ""
+    if TWSTOCK_OK:
+        try:
+            info = twstock.codes.get(str(stock_id))
+            market = getattr(info, "market", "") or ""
+        except Exception:
+            market = ""
+    if market == "上櫃":
+        return "006201", "櫃買替身 ETF 006201"
+    return "0050", "大盤替身 ETF 0050"
+
+
+def trend_review(df: pd.DataFrame, bench: pd.DataFrame) -> dict:
+    """df 為 analyze() 後資料；bench 為基準日線（可為空）。回傳評分與各項檢查。"""
+    d = df.copy().reset_index(drop=True)
+    d["MA50"] = d["Close"].rolling(50).mean()
+    d["MA150"] = d["Close"].rolling(150).mean()
+    d["MA200"] = d["Close"].rolling(200).mean()
+    d["BoxHigh"] = d["High"].rolling(20).max().shift(1)
+    d["VolMA5"] = d["Volume"].rolling(5).mean()
+    d["Breakout"] = (d["Close"] > d["BoxHigh"]) & (d["Volume"] > d["VolMA5"])
+
+    cur, prev = d.iloc[-1], d.iloc[-2]
+    hist_up = cur["MACD_Hist"] > prev["MACD_Hist"] if pd.notna(cur["MACD_Hist"]) and pd.notna(prev["MACD_Hist"]) else False
+    items = [
+        ("收盤 > MA5", bool(cur["Close"] > cur["MA5"]), 2),
+        ("量能較前日增加", bool(cur["Volume"] > prev["Volume"]), 2),
+        ("MACD 柱狀體上升", bool(hist_up), 2),
+        ("收盤 > MA20", bool(cur["Close"] > cur["MA20"]), 2),
+        ("箱型突破（突破前20日高且量>5日均量）", bool(cur["Breakout"]), 3),
+    ]
+    score = sum(w for _, ok, w in items if ok)
+
+    price = float(cur["Close"])
+    ma50 = float(cur["MA50"]) if pd.notna(cur["MA50"]) else np.nan
+    ma150 = float(cur["MA150"]) if pd.notna(cur["MA150"]) else np.nan
+    ma200 = float(cur["MA200"]) if pd.notna(cur["MA200"]) else np.nan
+    bias50 = (price - ma50) / ma50 * 100 if pd.notna(ma50) and ma50 > 0 else np.nan
+
+    rs_up, rs_note = None, "無基準資料，略過 RS"
+    if bench is not None and not bench.empty:
+        j = d[["Date", "Close"]].merge(bench[["Date", "Close"]], on="Date", how="left", suffixes=("", "_B"))
+        j["Close_B"] = j["Close_B"].ffill()
+        j = j.dropna()
+        if len(j) >= 6:
+            rs = j["Close"] / j["Close_B"]
+            rs_up = bool(rs.iloc[-1] > rs.iloc[-5])
+            rs_note = "RS 線近5日向上（強於基準）" if rs_up else "RS 線近5日向下（弱於基準）"
+
+    v20 = d["Volume"].rolling(20).mean().iloc[-1]
+    v_ratio = float(cur["Volume"] / v20) if pd.notna(v20) and v20 > 0 else np.nan
+
+    # 決策（與原腳本相同順序）
+    if pd.notna(bias50) and bias50 > 30:
+        status, reason = "🔴 轉為觀望", f"距 MA50 乖離 {bias50:.1f}%，高檔過度延伸，追價風險高"
+    elif rs_up is False:
+        status, reason = "🟡 轉為觀望", "相對強度落後基準，防範假突破"
+    elif score >= 7 or bool(cur["Breakout"]):
+        status = "🟢 可以買進"
+        reason = "箱型突破，正式表態" if bool(cur["Breakout"]) else "整理中多頭動能轉強"
+    else:
+        status, reason = "🟡 觀察中", "整理中，條件未齊"
+
+    if pd.notna(ma50) and price > ma50:
+        trend = "⚠️ 高檔極端延伸" if pd.notna(bias50) and bias50 > 30 else "🔥 多頭攻擊"
+    else:
+        trend = "☁️ 震盪整理"
+
+    prev_close = float(prev["Close"])
+    limit_up = round(prev_close * 1.1, 2)
+    touched = float(cur["High"]) >= limit_up - 0.05
+
+    return dict(items=items, score=score, status=status, reason=reason, trend=trend,
+                price=price, ma50=ma50, ma150=ma150, ma200=ma200, bias50=bias50,
+                rs_up=rs_up, rs_note=rs_note, v_ratio=v_ratio,
+                prev_close=prev_close, high=float(cur["High"]), limit_up=limit_up, touched=touched)
+
+
+
 def price_chart(df: pd.DataFrame, show_volume: bool = True):
     rows = 2 if show_volume else 1
     heights = [0.78, 0.22] if show_volume else [1.0]
@@ -897,9 +1028,9 @@ def main() -> None:
     ]
     metric_grid([(n, fmt_value(v, f)) for n, v, f in snapshot])
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 技術圖表", "💰 買賣與風控", "📊 量價分析", "🔎 歷史訊號",
-        "🧮 回測", "🏦 籌碼／基本面", "🧭 多檔掃描",
+        "🧮 回測", "🏦 籌碼／基本面", "🧭 多檔掃描", "🎯 趨勢評分",
     ])
 
     # ---------------- Tab 1 ----------------
@@ -1131,6 +1262,64 @@ def main() -> None:
                     show_df(res)
                 if failed:
                     st.warning("無資料或資料不足（<70筆）：" + "、".join(failed))
+
+    # ---------------- Tab 8 ----------------
+    with tab8:
+        st.subheader("🎯 趨勢評分（11分制＋RS＋乖離）")
+        if len(df) < 60:
+            st.warning("資料不足 60 筆，無法評分。")
+        else:
+            bsym, bnote = benchmark_symbol(stock_id)
+            bench = load_daily(bsym, str(start_date), str(end_date), source, token)
+            tr = trend_review(df, bench)
+
+            st.markdown(f"### {tr['status']}　{tr['trend']}")
+            st.write(f"原因：{tr['reason']}")
+            metric_grid([
+                ("買進得分", f"{tr['score']}/11"),
+                ("現價", f"{tr['price']:.2f}"),
+                ("MA50", fmt_value(tr["ma50"], "{:.2f}")),
+                ("MA150", fmt_value(tr["ma150"], "{:.2f}")),
+                ("MA200", fmt_value(tr["ma200"], "{:.2f}")),
+                ("50MA 乖離", fmt_value(tr["bias50"], "{:.2f}%")),
+                ("成交量倍率", fmt_value(tr["v_ratio"], "{:.2f}x")),
+                ("RS", tr["rs_note"] + f"（{bnote}）"),
+            ])
+
+            st.markdown("**計分明細**")
+            show_df(pd.DataFrame({
+                "條件": [n for n, _, _ in tr["items"]],
+                "達成": ["✅" if ok else "❌" for _, ok, _ in tr["items"]],
+                "配分": [w for _, _, w in tr["items"]],
+            }))
+
+            st.markdown("**Minervini 趨勢檢查**")
+            show_df(pd.DataFrame({
+                "檢查": ["股價 > 50MA", "50MA > 200MA", "RS 正斜率"],
+                "結果": [
+                    "✅ 是" if pd.notna(tr["ma50"]) and tr["price"] > tr["ma50"] else "❌ 否",
+                    "✅ 是" if pd.notna(tr["ma50"]) and pd.notna(tr["ma200"]) and tr["ma50"] > tr["ma200"]
+                    else ("資料不足" if pd.isna(tr["ma200"]) else "❌ 否"),
+                    "資料不足" if tr["rs_up"] is None else ("✅ 是" if tr["rs_up"] else "❌ 否"),
+                ],
+            }))
+            if pd.isna(tr["ma200"]):
+                st.caption("MA200 需要至少 200 筆資料，請把開始日期往前拉。")
+
+            st.markdown("**今日漲停判斷**")
+            show_df(pd.DataFrame({
+                "項目": ["昨收", "今日最高", "漲停價（昨收×1.1）", "是否觸及漲停"],
+                "數值": [f"{tr['prev_close']:.2f}", f"{tr['high']:.2f}", f"{tr['limit_up']:.2f}",
+                         "✅ 是" if tr["touched"] else "❌ 否"],
+            }))
+            st.caption("漲停價為簡化計算，未做升降單位（tick）進位，實際以交易所為準。")
+
+            st.markdown("**近35日價量警示**")
+            wdf = df.tail(35)[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+            wdf["警示"] = pv_warnings(df).tail(35).values
+            wdf["Volume"] = (wdf["Volume"] / 1000).round(0)
+            wdf = wdf.rename(columns={"Volume": "成交量(張)"})
+            show_df(wdf.sort_values("Date", ascending=False))
 
     # ---------------- Footer ----------------
     st.divider()
