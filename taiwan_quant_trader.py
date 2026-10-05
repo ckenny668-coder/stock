@@ -100,6 +100,33 @@ class DataAgent:
         df.to_csv(cache)
         return df
 
+    def fetch_price_only(self, ticker, start_date, end_date):
+        """只抓日線（給大盤替身 ETF 用）。"""
+        cache = os.path.join(self.cache_dir, f"{ticker}_{start_date}_{end_date}_px.csv")
+        if os.path.exists(cache) and (datetime.datetime.now().timestamp()
+                                      - os.path.getmtime(cache)) < self.ttl:
+            return pd.read_csv(cache, index_col="Date", parse_dates=True)
+        p = finmind_get("TaiwanStockPrice", ticker, start_date, end_date, self.token)
+        if p.empty:
+            raise ValueError(f"無法取得 {ticker} 價格資料")
+        df = pd.DataFrame({"Date": pd.to_datetime(p["date"]),
+                           "Close": pd.to_numeric(p["close"], errors="coerce")}
+                          ).dropna().sort_values("Date").drop_duplicates("Date").set_index("Date")
+        df.to_csv(cache)
+        return df
+
+    def market_of(self, ticker):
+        """回傳 '上市' / '上櫃' / ''（查不到）。"""
+        try:
+            info = finmind_get("TaiwanStockInfo", ticker, "2000-01-01",
+                               datetime.date.today().strftime("%Y-%m-%d"), self.token)
+            if not info.empty and "type" in info.columns:
+                t = str(info["type"].iloc[0]).lower()
+                return {"twse": "上市", "tpex": "上櫃"}.get(t, "")
+        except Exception:
+            pass
+        return ""
+
 
 # ==========================================
 # 2. Analyst Agent
@@ -286,9 +313,114 @@ class VisualizationAgent:
         fig.update_xaxes(type="category", nticks=12)
         if out_html:
             fig.write_html(out_html)
-        if show:
+            if show:
+                import webbrowser
+                webbrowser.open("file://" + os.path.abspath(out_html))
+        elif show:
             fig.show()
         return fig
+
+
+# ==========================================
+# 4b. 趨勢評分：價量警示／箱型突破／11分制／RS／Minervini／漲停
+# ==========================================
+def pv_warnings(df):
+    """逐日價量警示文字。"""
+    c, o, v = df["Close"], df["Open"], df["Volume"]
+    ma5, ma20 = df["SMA_5"], df["SMA_20"]
+    c1, c2, v1, v2 = c.shift(1), c.shift(2), v.shift(1), v.shift(2)
+    out = []
+    for i in range(len(df)):
+        close, open_p, vol = c.iloc[i], o.iloc[i], v.iloc[i]
+        pc, pv, m5, m20 = c1.iloc[i], v1.iloc[i], ma5.iloc[i], ma20.iloc[i]
+        if any(pd.isna(x) for x in (pc, pv, m5, m20)):
+            out.append("")
+            continue
+        w = []
+        if close > m20 and pc <= m20:
+            w.append("突破 20 日線")
+        if close < m5 and pc >= m5:
+            w.append("跌破 5 日線，短線防線失守，建議減碼")
+        up, down, vup, vdn = close > pc, close < pc, vol > pv, vol < pv
+        red, black = close > open_p, close < open_p
+        if red and up:
+            w.append("價漲量增，注意是否突破箱型高點（正式表態）" if vup
+                     else "價漲量縮就難做，留意反彈／下影線" if vdn else "價漲量平")
+        elif black and up:
+            w.append("高檔震盪：外漲內跌、量增注意出貨風險" if vup else "高檔震盪：假陽線量縮，獲利回吐")
+        elif down:
+            w.append("價跌量增就難做" if vup else "價跌量縮" if vdn else "價跌量平可能續跌")
+        else:
+            w.append("價平量增" if vup else "價平量縮，等待主力" if vdn else "價平量平")
+        p2, q2 = c2.iloc[i], v2.iloc[i]
+        if pd.notna(p2) and pd.notna(q2):
+            if close < p2 and vol > q2 and close < pc:
+                w.append("低價夾量，連續創新低")
+            if close > pc and vol < pv and close < p2:
+                w.append("小量上漲、大量拉回")
+        out.append("；".join(w))
+    return pd.Series(out, index=df.index)
+
+
+def trend_review(df, bench=None, market=""):
+    """df 為 process_indicators 後資料；bench 為大盤替身日線（含 Close），可為 None。"""
+    d = df.copy()
+    d["MA50"] = d["Close"].rolling(50).mean()
+    d["MA150"] = d["Close"].rolling(150).mean()
+    d["MA200"] = d["Close"].rolling(200).mean()
+    d["BoxHigh"] = d["High"].rolling(20).max().shift(1)
+    d["VolMA5"] = d["Volume"].rolling(5).mean()
+    d["Breakout"] = (d["Close"] > d["BoxHigh"]) & (d["Volume"] > d["VolMA5"])
+
+    cur, prev = d.iloc[-1], d.iloc[-2]
+    hist_up = bool(pd.notna(cur["MACD_Hist"]) and pd.notna(prev["MACD_Hist"])
+                   and cur["MACD_Hist"] > prev["MACD_Hist"])
+    items = [("收盤 > MA5", bool(cur["Close"] > cur["SMA_5"]), 2),
+             ("量能較前日增加", bool(cur["Volume"] > prev["Volume"]), 2),
+             ("MACD 柱狀體上升", hist_up, 2),
+             ("收盤 > MA20", bool(cur["Close"] > cur["SMA_20"]), 2),
+             ("箱型突破（破前20日高且量>5日均量）", bool(cur["Breakout"]), 3)]
+    score = sum(w for _, ok, w in items if ok)
+
+    price = float(cur["Close"])
+    ma50, ma150, ma200 = (float(cur[k]) if pd.notna(cur[k]) else np.nan for k in ("MA50", "MA150", "MA200"))
+    bias50 = (price - ma50) / ma50 * 100 if pd.notna(ma50) and ma50 > 0 else np.nan
+
+    rs_up, rs_note = None, "無基準資料，略過 RS"
+    if bench is not None and len(bench):
+        j = d[["Close"]].join(bench[["Close"]].rename(columns={"Close": "B"}), how="left")
+        j["B"] = j["B"].ffill()
+        j = j.dropna()
+        if len(j) >= 6:
+            rs = j["Close"] / j["B"]
+            rs_up = bool(rs.iloc[-1] > rs.iloc[-5])
+            rs_note = "RS 近5日向上（強於大盤）" if rs_up else "RS 近5日向下（弱於大盤）"
+
+    v20 = d["Volume"].rolling(20).mean().iloc[-1]
+    v_ratio = float(cur["Volume"] / v20) if pd.notna(v20) and v20 > 0 else np.nan
+
+    if pd.notna(bias50) and bias50 > 30:
+        status, reason = "🔴 轉為觀望", f"距 MA50 乖離 {bias50:.1f}%，高檔過度延伸，追價風險高"
+    elif rs_up is False:
+        status, reason = "🟡 轉為觀望", "相對強度落後大盤，防範假突破"
+    elif score >= 7 or bool(cur["Breakout"]):
+        status = "🟢 可以買進"
+        reason = "箱型突破，正式表態" if bool(cur["Breakout"]) else "整理中多頭動能轉強"
+    else:
+        status, reason = "🟡 觀察中", "整理中，條件未齊"
+
+    if pd.notna(ma50) and price > ma50:
+        trend = "⚠️ 高檔極端延伸" if pd.notna(bias50) and bias50 > 30 else "🔥 多頭攻擊"
+    else:
+        trend = "☁️ 震盪整理"
+
+    prev_close = float(prev["Close"])
+    limit_up = round(prev_close * 1.1, 2)
+    return dict(items=items, score=score, status=status, reason=reason, trend=trend,
+                price=price, ma50=ma50, ma150=ma150, ma200=ma200, bias50=bias50,
+                rs_up=rs_up, rs_note=rs_note, v_ratio=v_ratio, prev_close=prev_close,
+                high=float(cur["High"]), limit_up=limit_up,
+                touched=float(cur["High"]) >= limit_up - 0.05)
 
 
 # ==========================================
@@ -300,6 +432,49 @@ class StockAnalysisOrchestrator:
         self.analyst = AnalystAgent()
         self.bt = BacktestAgent()
         self.vis = VisualizationAgent()
+
+    def print_trend_review(self, ticker, df, start_date, end_date):
+        if len(df) < 60:
+            print("⚠️ 資料不足 60 筆，略過趨勢評分。")
+            return
+        market = self.data.market_of(ticker)
+        bsym = "006201" if market == "上櫃" else "0050"
+        bname = "櫃買替身 ETF 006201" if market == "上櫃" else "大盤替身 ETF 0050"
+        try:
+            bench = self.data.fetch_price_only(bsym, start_date, end_date)
+        except Exception as e:
+            print(f"⚠️ 無法取得基準 {bsym}，略過 RS：{e}")
+            bench = None
+        tr = trend_review(df, bench, market)
+        f = lambda x, fmt="{:.2f}": "-" if pd.isna(x) else fmt.format(x)
+
+        print("\n" + "=" * 66)
+        print(f"🎯 趨勢評分（11分制）｜{ticker}（{market or '市場未知'}）｜基準：{bname}")
+        print(f"得分 {tr['score']}/11 | 建議：{tr['status']} | 趨勢：{tr['trend']}")
+        print(f"原因：{tr['reason']}")
+        print("-" * 66)
+        for n, ok, w in tr["items"]:
+            print(f"  {'✅' if ok else '❌'} {n}（{w}分）")
+        print("-" * 66)
+        print(f"現價 {tr['price']:.2f} | 50MA {f(tr['ma50'])} | 150MA {f(tr['ma150'])} | 200MA {f(tr['ma200'])}")
+        print(f"50MA 乖離 {f(tr['bias50'], '{:.2f}%')} | 成交量倍率 {f(tr['v_ratio'], '{:.2f}x')} | {tr['rs_note']}")
+        print("Minervini：股價>50MA " + ("✅" if pd.notna(tr["ma50"]) and tr["price"] > tr["ma50"] else "❌")
+              + " | 50MA>200MA " + ("資料不足" if pd.isna(tr["ma200"]) else ("✅" if tr["ma50"] > tr["ma200"] else "❌"))
+              + " | RS向上 " + ("資料不足" if tr["rs_up"] is None else ("✅" if tr["rs_up"] else "❌")))
+        if pd.isna(tr["ma200"]):
+            print("  （MA200 需 200 筆以上資料，可把開始日期往前拉）")
+        print(f"漲停判斷：昨收 {tr['prev_close']:.2f} | 今高 {tr['high']:.2f} | 漲停價 {tr['limit_up']:.2f} | "
+              f"{'✅ 觸及漲停' if tr['touched'] else '❌ 未觸及'}（簡化計算，未做升降單位進位）")
+
+        w = df.tail(35)[["Open", "High", "Low", "Close", "Volume"]].copy()
+        w["Volume"] = (w["Volume"] / 1000).round(0)
+        w.columns = ["開", "高", "低", "收", "量(張)"]
+        w["警示"] = pv_warnings(df).tail(35).values
+        w.index = w.index.date
+        print("\n近35日價量警示：")
+        pd.set_option("display.max_colwidth", 80, "display.width", 200)
+        print(w.to_string(float_format=lambda x: f"{x:,.2f}"))
+        print("=" * 66)
 
     def run(self, ticker, start_date="2022-01-01", show=True):
         end_date = datetime.date.today().strftime("%Y-%m-%d")
@@ -343,6 +518,8 @@ class StockAnalysisOrchestrator:
         if len(t):
             print(t.tail(10).to_string(index=False, float_format=lambda x: f"{x:,.2f}"))
             print()
+
+        self.print_trend_review(ticker, df, start_date, end_date)
 
         out = f"{ticker}_report.html"
         self.vis.render(ticker, df, out_html=out, show=show)
