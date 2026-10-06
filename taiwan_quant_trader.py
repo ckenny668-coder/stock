@@ -852,6 +852,89 @@ def trend_review(df: pd.DataFrame, bench: pd.DataFrame) -> dict:
 
 
 
+# =========================================================
+# 財富自由：本益比(PER)歷史位置估值（六級）
+# =========================================================
+VAL_ZONES = [
+    ("特價", "貼近歷史本益比最低區", "#d97706"),
+    ("便宜", "落在歷史區間下緣", "#16a34a"),
+    ("合理", "落在歷史區間中段", "#2563eb"),
+    ("偏高", "落在歷史區間中上段", "#ea580c"),
+    ("昂貴", "接近歷史區間上緣", "#dc2626"),
+    ("瘋狂", "突破歷史本益比最高區", "#7c3aed"),
+]
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _finmind_per(stock_id: str, start: str, end: str, token: str) -> pd.DataFrame:
+    if not FINMIND_OK:
+        raise RuntimeError("FinMind 未安裝")
+    df = finmind_get("TaiwanStockPER", stock_id, start, end, token)
+    if df is None or df.empty or "PER" not in df.columns:
+        raise ValueError("無本益比資料")
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["date"], errors="coerce")
+    for c in ("PER", "PBR", "dividend_yield"):
+        df[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
+    df = df.dropna(subset=["Date"]).sort_values("Date").drop_duplicates("Date").reset_index(drop=True)
+    return df[["Date", "PER", "PBR", "dividend_yield"]]
+
+
+def valuation_analysis(per_df: pd.DataFrame) -> dict:
+    """依本益比在歷史區間的位置分六級。分界：10／30／60／85 百分位，高於歷史最高為「瘋狂」。"""
+    s = per_df["PER"]
+    pos = s[s > 0].dropna()
+    if len(pos) < 250:
+        return {"ok": False, "msg": "歷史本益比資料不足（需要約一年以上）。"}
+    cur = s.iloc[-1]
+    if pd.isna(cur) or cur <= 0:
+        return {"ok": False, "msg": "目前本益比為 0 或虧損（EPS≤0），本益比估值不適用。"}
+    cur = float(cur)
+
+    hist = pos.iloc[:-1] if pos.index[-1] == s.index[-1] else pos
+    q = [float(x) for x in hist.quantile([0.10, 0.30, 0.60, 0.85]).values]
+    lo, hi = float(hist.min()), float(hist.max())
+    pct = float((hist <= cur).mean() * 100)
+
+    if cur > hi:
+        zone = 5
+    elif cur <= q[0]:
+        zone = 0
+    elif cur <= q[1]:
+        zone = 1
+    elif cur <= q[2]:
+        zone = 2
+    elif cur <= q[3]:
+        zone = 3
+    else:
+        zone = 4
+
+    edges = [lo, q[0], q[1], q[2], q[3], hi]
+    return {"ok": True, "cur": cur, "zone": zone, "pct": pct, "edges": edges,
+            "lo": lo, "hi": hi, "median": float(hist.median()),
+            "pbr": float(per_df["PBR"].iloc[-1]) if pd.notna(per_df["PBR"].iloc[-1]) else np.nan,
+            "dy": float(per_df["dividend_yield"].iloc[-1]) if pd.notna(per_df["dividend_yield"].iloc[-1]) else np.nan,
+            "date": per_df["Date"].iloc[-1]}
+
+
+def valuation_chart(per_df: pd.DataFrame, va: dict):
+    fig = go.Figure()
+    e = va["edges"]
+    bands = [(e[0], e[1]), (e[1], e[2]), (e[2], e[3]), (e[3], e[4]), (e[4], e[5])]
+    for (y0, y1), (name, _, color) in zip(bands, VAL_ZONES[:5]):
+        fig.add_hrect(y0=y0, y1=y1, fillcolor=color, opacity=0.10, line_width=0,
+                      annotation_text=name, annotation_position="top left")
+    pos = per_df[per_df["PER"] > 0]
+    fig.add_trace(go.Scatter(x=pos["Date"], y=pos["PER"], mode="lines", name="本益比",
+                             line=dict(width=1.6, color="#334155")))
+    fig.add_trace(go.Scatter(x=[va["date"]], y=[va["cur"]], mode="markers+text", name="目前",
+                             text=[f"{va['cur']:.1f}"], textposition="top center",
+                             marker=dict(size=11, color=VAL_ZONES[va["zone"]][2])))
+    fig.update_layout(title="本益比歷史走勢與六級區間", height=420, showlegend=False,
+                      hovermode="x unified", margin=dict(l=20, r=20, t=50, b=20))
+    return fig
+
+
 def price_chart(df: pd.DataFrame, show_volume: bool = True):
     rows = 2 if show_volume else 1
     heights = [0.78, 0.22] if show_volume else [1.0]
@@ -1049,9 +1132,9 @@ def main() -> None:
     ]
     metric_grid([(n, fmt_value(v, f)) for n, v, f in snapshot])
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "📈 技術圖表", "💰 買賣與風控", "📊 量價分析", "🔎 歷史訊號",
-        "🧮 回測", "🏦 籌碼／基本面", "🧭 多檔掃描", "🎯 趨勢評分",
+        "🧮 回測", "🏦 籌碼／基本面", "🧭 多檔掃描", "🎯 趨勢評分", "💎 財富自由",
     ])
 
     # ---------------- Tab 1 ----------------
@@ -1347,6 +1430,86 @@ def main() -> None:
             wdf["Volume"] = (wdf["Volume"] / 1000).round(0)
             wdf = wdf.rename(columns={"Volume": "成交量(張)"})
             show_df(wdf.sort_values("Date", ascending=False))
+
+    # ---------------- Tab 9 ----------------
+    with tab9:
+        st.subheader("💎 財富自由｜估值儀表")
+        st.caption("手中股票現在是便宜還是昂貴？以本益比(PER)在歷史區間的位置分六級判斷。")
+
+        yrs = st.radio("歷史區間", ["5年", "10年"], index=1, horizontal=True, key="val_years")
+        days = 365 * (5 if yrs == "5年" else 10)
+        v_start = str(dt.date.today() - dt.timedelta(days=days))
+        v_end = str(dt.date.today())
+
+        per_df = safe_call(_finmind_per, stock_id, v_start, v_end, token)
+        if per_df.empty:
+            st.warning("取不到本益比資料（FinMind 限制、ETF／無本益比標的，或網路問題）。")
+        else:
+            va = valuation_analysis(per_df)
+            if not va["ok"]:
+                st.info(va["msg"])
+            else:
+                name, desc, color = VAL_ZONES[va["zone"]]
+                st.markdown(
+                    f"<div style='padding:14px 16px;border-radius:12px;border:2px solid {color};'>"
+                    f"<span style='font-size:28px;font-weight:700;color:{color}'>{name}</span>"
+                    f"<span style='margin-left:12px;opacity:.8'>{desc}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                metric_grid([
+                    ("目前本益比", f"{va['cur']:.2f}"),
+                    ("歷史百分位", f"{va['pct']:.0f}%"),
+                    ("歷史最低／中位／最高", f"{va['lo']:.1f}／{va['median']:.1f}／{va['hi']:.1f}"),
+                    ("股價淨值比", fmt_value(va["pbr"], "{:.2f}")),
+                    ("殖利率", fmt_value(va["dy"], "{:.2f}%")),
+                    ("資料日期", str(va["date"].date())),
+                ])
+
+                price_now = safe_float(latest["Close"])
+                eps_est = price_now / va["cur"] if price_now > 0 else np.nan
+                e = va["edges"]
+                rows = []
+                for i, (zn, zd, _) in enumerate(VAL_ZONES):
+                    if i < 5:
+                        lo_pe, hi_pe = e[i], e[i + 1]
+                        pe_txt = f"{lo_pe:.1f} ~ {hi_pe:.1f}"
+                        px_txt = (f"{lo_pe * eps_est:.1f} ~ {hi_pe * eps_est:.1f}"
+                                  if pd.notna(eps_est) else "-")
+                    else:
+                        pe_txt = f"> {e[5]:.1f}"
+                        px_txt = f"> {e[5] * eps_est:.1f}" if pd.notna(eps_est) else "-"
+                    rows.append({"等級": ("👉 " if i == va["zone"] else "") + zn, "說明": zd,
+                                 "本益比區間": pe_txt, "對應股價(估)": px_txt})
+                show_df(pd.DataFrame(rows))
+                st.caption("對應股價 = 區間本益比 × 目前推算 EPS（現價 ÷ 目前本益比），僅為粗估。")
+                show_chart(valuation_chart(per_df, va))
+
+        st.markdown("**手中股票一鍵估值**")
+        v_list = st.text_area("股票清單", value="2330, 2317, 2454, 6213, 2383, 6274, 3585, 6672",
+                              height=70, key="val_list")
+        if st.button("開始估值掃描", key="val_scan"):
+            codes = [c for c in pd.Series(v_list.replace(",", " ").replace("，", " ").split())
+                     .drop_duplicates().tolist() if c]
+            out, bad = [], []
+            bar = st.progress(0.0)
+            for n, code in enumerate(codes, 1):
+                d = safe_call(_finmind_per, code, v_start, v_end, token)
+                r = valuation_analysis(d) if not d.empty else {"ok": False}
+                if r["ok"]:
+                    out.append({"代號": code, "等級": VAL_ZONES[r["zone"]][0],
+                                "本益比": round(r["cur"], 2), "百分位%": round(r["pct"]),
+                                "歷史低": round(r["lo"], 1), "歷史高": round(r["hi"], 1),
+                                "殖利率%": r["dy"]})
+                else:
+                    bad.append(code)
+                bar.progress(n / max(len(codes), 1))
+            bar.empty()
+            if out:
+                show_df(pd.DataFrame(out).sort_values("百分位%"))
+            if bad:
+                st.warning("無法估值（無資料、資料不足或虧損）：" + "、".join(bad))
+
+        st.caption("本益比估值對景氣循環股、虧損或一次性獲利波動大的公司可能失真，僅供研究參考，不構成投資建議。")
 
     # ---------------- Footer ----------------
     st.divider()
