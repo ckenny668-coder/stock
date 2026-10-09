@@ -1,0 +1,44 @@
+name: keepalive
+on:
+  schedule:
+    - cron: "0 */8 * * *"   # 每 8 小時開一次網頁
+  workflow_dispatch:
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install playwright
+          playwright install --with-deps chromium
+      - run: |
+          cat > visit.py <<'PYEOF'
+          from playwright.sync_api import sync_playwright
+          URLS = [
+              "https://kqdbalzj8hpf78ny4reedx.streamlit.app",   # 台股量化
+              "https://suypb6ilvp8ggkhnq8zjkm.streamlit.app",   # 美股選股
+          ]
+          with sync_playwright() as p:
+              b = p.chromium.launch()
+              for url in URLS:
+                  try:
+                      pg = b.new_page()
+                      pg.goto(url, timeout=90000)
+                      pg.wait_for_timeout(15000)
+                      woke = False
+                      for f in [pg] + pg.frames:
+                          btn = f.get_by_text("get this app back up")
+                          if btn.count():
+                              btn.first.click()
+                              woke = True
+                              break
+                      print(url, "-> woke app" if woke else "-> already awake")
+                      pg.wait_for_timeout(45000)
+                      pg.close()
+                  except Exception as e:
+                      print(url, "-> error:", e)
+              b.close()
+          PYEOF
+          python visit.py
