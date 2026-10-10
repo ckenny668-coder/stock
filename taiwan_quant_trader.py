@@ -418,6 +418,17 @@ def generate_signals(
     golden = b(df["MA5_MA20_Golden"])
     death = b(df["MA5_MA20_Death"])
     above_ma20 = b(df["Close"] > df["MA20"])
+
+    # 事件 vs 狀態：「突破MA20」只在前一日收盤 <= MA20、今日收盤 > MA20 那天觸發一次；
+    # 之後連續在 MA20 之上的日子只算「狀態」，用「MA20上方第N天」表示。
+    prev_close = df["Close"].shift(1)
+    prev_ma20 = df["MA20"].shift(1)
+    cross_up_ma20 = b((df["Close"] > df["MA20"]) & (prev_close <= prev_ma20))
+    below_run = (~above_ma20).cumsum()
+    days_above_ma20 = above_ma20.astype(int).groupby(below_run).cumsum()
+    df["CrossUpMA20"] = cross_up_ma20
+    df["DaysAboveMA20"] = days_above_ma20
+
     pv_up = df["PriceVolume"].eq("價漲量增")
 
     i = lambda s: s.astype(int)
@@ -425,7 +436,7 @@ def generate_signals(
     # ---------------- 買進分數 ----------------
     if strategy == "波段":
         buy = (i(trend_up) * 2 + i(macd_bull) + i(kd_bull) + i(rsi_strong)
-               + i(bias_buy) + i(pullback) + i(golden) * 2)
+               + i(bias_buy) + i(pullback) + i(golden) * 2 + i(cross_up_ma20) * 2)
     elif strategy == "突破":
         buy = (i(breakout) * 3 + i(vol_break) + i(bb_breakout) + i(trend_up) + i(macd_bull))
     elif strategy == "量價突破":
@@ -438,6 +449,7 @@ def generate_signals(
     else:  # 綜合策略：聯集，每個因子只計一次
         buy = (i(trend_up) * 2 + i(macd_bull) + i(kd_bull) + i(rsi_strong)
                + i(bias_buy) + i(pullback) * 2 + i(golden) * 2
+               + i(cross_up_ma20) * 2
                + i(breakout) * 3 + i(vol_break) * 2 + i(bb_breakout))
 
     # ---------------- 賣出分數 ----------------
@@ -462,19 +474,24 @@ def generate_signals(
 
     # 訊號原因（向量化）
     conds = [
-        (above_ma20, "站上MA20"),
+        (cross_up_ma20, "★突破MA20(今日)"),
+        (b(above_ma20 & ~cross_up_ma20), None),  # 狀態：下面動態組「MA20上方第N天」
         (b(df["MA20"] > df["MA60"]), "MA多頭"),
         (macd_bull, "MACD偏多"),
         (b(df["K"] > df["D"]), "KD偏多"),
         (vol_break, "量能放大"),
-        (breakout, "突破20日壓力"),
+        (breakout, "突破20日高點(壓力)"),
         (pullback, "回測MA20"),
         (rsi_over, "RSI過熱"),
         (breakdown, "跌破20日支撐"),
     ]
     reasons = pd.Series("", index=df.index)
     for cond, label in conds:
-        reasons = reasons + np.where(cond, label + "、", "")
+        if label is None:
+            state = "MA20上方第" + days_above_ma20.astype(str) + "天、"
+            reasons = reasons + np.where(cond, state, "")
+        else:
+            reasons = reasons + np.where(cond, label + "、", "")
     reasons = reasons.str.rstrip("、").replace("", "無明確條件")
     df["SignalReason"] = reasons
 
