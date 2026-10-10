@@ -57,7 +57,39 @@ except Exception:
 # =========================================================
 # Streamlit 版本相容
 # =========================================================
+# 表格欄位的中文顯示（只改顯示，不影響程式內部使用的欄位名稱）
+COL_ZH = {
+    "Date": "日期", "Open": "開盤", "High": "最高", "Low": "最低", "Close": "收盤",
+    "Volume": "成交量", "Volume_Ratio": "量比",
+    "MA5": "5日均線", "MA20": "20日均線", "MA60": "60日均線",
+    "DIF": "DIF快線", "MACD": "MACD慢線", "K": "K值", "D": "D值", "J": "J值",
+    "RSI14": "RSI(14)", "BIAS5": "5日乖離%", "BIAS20": "20日乖離%",
+    "BB_UPPER": "布林上軌", "BB_LOWER": "布林下軌",
+    "PriceVolume": "量價型態", "Signal": "訊號", "SignalReason": "訊號原因",
+    "BuyScore": "買進分", "SellScore": "賣出分", "CompositeScore": "綜合分",
+    "PriceChangePct": "漲跌幅%", "VolumeChangePct": "量增減%",
+    "Institution": "法人類別", "NetBuySell": "淨買賣超(股)",
+    "Revenue": "月營收", "EntryDate": "進場日", "ExitDate": "出場日",
+    "EntryPrice": "進場價", "ExitPrice": "出場價", "Shares": "股數",
+    "Profit": "損益", "ReturnPct": "報酬率%", "Reason": "出場原因",
+    "CrossUpMA20": "剛突破20日均線", "DaysAboveMA20": "20日均線上方天數",
+    "StrongBuy": "強力買進", "StrongSell": "強力賣出",
+    "BuySignal": "買進訊號", "SellSignal": "賣出訊號",
+}
+
+# 法人名稱（FinMind 英文代碼 → 中文）
+INST_ZH = {
+    "Foreign_Investor": "外資及陸資",
+    "Foreign_Dealer_Self": "外資自營商",
+    "Investment_Trust": "投信",
+    "Dealer_self": "自營商（自行買賣）",
+    "Dealer_Hedging": "自營商（避險）",
+    "Dealer": "自營商",
+}
+
+
 def show_df(df: pd.DataFrame) -> None:
+    df = df.rename(columns={c: COL_ZH.get(c, c) for c in df.columns})
     try:
         st.dataframe(df, width="stretch", hide_index=True)
     except Exception:
@@ -250,6 +282,7 @@ def _finmind_chip(stock_id: str, start: str, end: str, token: str) -> pd.DataFra
     else:
         df["Institution"] = "法人"
 
+    df["Institution"] = df["Institution"].map(lambda x: INST_ZH.get(str(x), str(x)))
     return df[["Date", "Institution", "NetBuySell"]].dropna(subset=["Date"])
 
 
@@ -974,7 +1007,8 @@ def price_chart(df: pd.DataFrame, show_volume: bool = True):
     ma_list = ["MA5", "MA20", "MA60"] if mobile else ["MA5", "MA20", "MA60", "MA120"]
     for ma in ma_list:
         if ma in df:
-            fig.add_trace(go.Scatter(x=df["Date"], y=df[ma], mode="lines", name=ma,
+            fig.add_trace(go.Scatter(x=df["Date"], y=df[ma], mode="lines",
+                                     name=ma.replace("MA", "") + "日均線",
                                      line=dict(width=1.2)), row=1, col=1)
 
     if not mobile:
@@ -1031,22 +1065,22 @@ def indicator_chart(df: pd.DataFrame, indicator: str):
     fig = go.Figure()
 
     if indicator == "MACD":
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["DIF"], name="DIF"))
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["MACD"], name="MACD"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["DIF"], name="DIF快線"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["MACD"], name="MACD慢線"))
         fig.add_trace(go.Bar(x=df["Date"], y=df["MACD_Hist"], name="柱狀體"))
     elif indicator == "KD":
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["K"], name="K"))
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["D"], name="D"))
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["J"], name="J"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["K"], name="K值"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["D"], name="D值"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["J"], name="J值"))
         fig.add_hline(y=80, line_dash="dot")
         fig.add_hline(y=20, line_dash="dot")
     elif indicator == "RSI":
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["RSI14"], name="RSI14"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["RSI14"], name="RSI(14)"))
         fig.add_hline(y=70, line_dash="dot")
         fig.add_hline(y=30, line_dash="dot")
     else:
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["BIAS5"], name="BIAS5"))
-        fig.add_trace(go.Scatter(x=df["Date"], y=df["BIAS20"], name="BIAS20"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["BIAS5"], name="5日乖離"))
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["BIAS20"], name="20日乖離"))
         fig.add_hline(y=0, line_dash="dot")
 
     fig.update_layout(title=indicator, height=350, hovermode="x unified",
@@ -1284,8 +1318,8 @@ def main() -> None:
                 ("總報酬", metrics["TotalReturn"], "{:.2f}%"),
                 ("最大回撤", metrics["MaxDrawdown"], "{:.2f}%"),
                 ("勝率", metrics["WinRate"], "{:.2f}%"),
-                ("Profit Factor", metrics["ProfitFactor"], "{:.2f}"),
-                ("Sharpe", metrics["Sharpe"], "{:.2f}"),
+                ("獲利因子", metrics["ProfitFactor"], "{:.2f}"),
+                ("夏普值", metrics["Sharpe"], "{:.2f}"),
                 ("交易次數", metrics["Trades"], "{:.0f}"),
             ]
             metric_grid([(n, fmt_value(v, f)) for n, v, f in items], per_row=4)
