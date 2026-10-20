@@ -8,9 +8,11 @@ Streamlit App - Stan Weinstein 階段分析
   - 分析參數（均線、延伸乖離率、跳空、爆量）
   - 台股籌碼：大戶持股比例（副圖）+ 籌碼訊號
 
-大戶持股資料來源（可同時使用，依序合併）：
-  1. FinMind 股權分散表（完整歷史，需 backer/sponsor 會員 token；取得的資料會存進 holders_cache/）
-  2. 手動貼上（例如直接從你的籌碼 K 線 app 複製每週表格，優先於其他來源）
+大戶持股資料來源（可同時使用，後者覆蓋前者同日期的資料）：
+  1. 神秘金字塔（norway.twsthr.info）：免費、自動取得約三年週資料，僅有 >400 張、>1000 張兩種大戶定義
+  2. FinMind 股權分散表（需 backer/sponsor 會員 token，選填）
+  3. 手動貼上（例如直接從你的籌碼 K 線 app 複製每週表格，優先於其他來源）
+  取得的資料會存進 holders_cache/ 作為本機快取。
 
 執行方式：
     pip install streamlit yfinance pandas numpy matplotlib requests
@@ -20,6 +22,7 @@ Streamlit App - Stan Weinstein 階段分析
 import os
 import re
 import datetime as dt
+from html import unescape
 from pathlib import Path
 
 import numpy as np
@@ -76,7 +79,7 @@ def load_price_data(ticker: str, start: dt.date, end: dt.date) -> pd.DataFrame:
 #   內部統一格式：DataFrame(date, ge400, ge600, ge800, ge1000)
 #   ge1000 = 持股 1000 張以上的比例（%），其餘類推
 # ----------------------------------------------------------------------
-THRESHOLDS = (400, 600, 800, 1000)
+THRESHOLDS = (400, 1000)
 CACHE_DIR = Path("holders_cache")
 
 
@@ -128,6 +131,68 @@ def fetch_finmind_history(stock_id: str, start: dt.date, end: dt.date, token: st
             row[f"ge{t}"] = float(g.loc[g["lb"] > t * 1000, "percent"].sum())
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+_TWSTHR_URL = "https://norway.twsthr.info/StockHolders.aspx?stock={sid}"
+_DATE_TOKEN = re.compile(r"^20\d{6}$")
+_NUM_TOKEN = re.compile(r"^\d[\d,]*(?:\.\d+)?$")
+
+
+def parse_twsthr_html(page: str) -> pd.DataFrame:
+    """
+    解析神秘金字塔「集保戶股權分散表」頁面。每週一列，數字欄位順序為：
+      集保總張數、總股東人數、平均張數/人、>400張持有張數、>400張持有%、>400張人數、
+      400~600張人數、600~800張人數、800~1000張人數、>1000張人數、>1000張持有%、收盤價
+    不依賴 HTML 標籤結構：先去掉標籤，再以「8 位數日期 + 後面的數字」切出每一列，
+    並用 (>1000 張持有% <= >400 張持有% <= 100) 檢查欄位沒有錯位。
+    """
+    text = unescape(re.sub(r"<[^>]+>", " ", page))
+    tokens = text.split()
+    rows, seen = [], set()
+    i, n = 0, len(tokens)
+    while i < n:
+        if not _DATE_TOKEN.match(tokens[i]):
+            i += 1
+            continue
+        vals, j = [], i + 1
+        while (j < n and len(vals) < 12 and _NUM_TOKEN.match(tokens[j])
+               and not _DATE_TOKEN.match(tokens[j])):
+            vals.append(tokens[j])
+            j += 1
+        if len(vals) >= 11:
+            try:
+                d = pd.to_datetime(tokens[i], format="%Y%m%d")
+                p400 = float(vals[4].replace(",", ""))
+                p1000 = float(vals[10].replace(",", ""))
+            except ValueError:
+                d = None
+            if d is not None and d not in seen and 0 < p1000 <= p400 <= 100:
+                seen.add(d)
+                rows.append({"date": d, "ge400": p400, "ge1000": p1000})
+        i = max(j, i + 1)
+    cols = ["date", *[f"ge{t}" for t in THRESHOLDS]]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).sort_values("date").reset_index(drop=True)[cols]
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def fetch_twsthr_history(stock_id: str) -> pd.DataFrame:
+    """免費、不需登入的大戶持股週歷史（第三方網站，非官方 API；快取 6 小時，避免重複請求）。"""
+    resp = requests.get(
+        _TWSTHR_URL.format(sid=stock_id),
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    df = parse_twsthr_html(resp.content.decode("utf-8", errors="replace"))
+    if df.empty:
+        raise RuntimeError("頁面內容無法解析（網站改版、被擋或查無此代號）")
+    return df
 
 
 def _cache_path(stock_id: str) -> Path:
@@ -192,6 +257,17 @@ def build_holders_series(
     notes: list[str] = []
     col = f"ge{thr_lots}"
     frames = [read_cache(stock_id)]
+
+    try:
+        tw_df = fetch_twsthr_history(stock_id)
+        frames.append(tw_df)
+        write_cache(stock_id, tw_df)
+        notes.append(
+            f"神秘金字塔：取得 {len(tw_df)} 週資料"
+            f"（{tw_df['date'].min().date()} ～ {tw_df['date'].max().date()}）。"
+        )
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"神秘金字塔讀取失敗：{e}")
 
     if token.strip():
         try:
@@ -463,7 +539,7 @@ with st.sidebar:
     )
     finmind_token = st.text_input(
         "FinMind Token（選填）", type="password", disabled=not tw,
-        help="股權分散表歷史資料需 FinMind backer/sponsor 會員。沒有 token 時只會用本機快取（先前用 token 取得的資料）+ 手動貼上的資料。",
+        help="預設已自動從神秘金字塔取得免費週資料，不需要 token。只有你有 FinMind backer/sponsor 會員、想用它的資料覆蓋時才填。",
     )
     manual_text = st.text_area(
         "手動貼上大戶持股（選填）", height=140, disabled=not tw,
@@ -495,12 +571,12 @@ if run_btn:
         for n in notes:
             st.caption(f"籌碼資料：{n}")
         if holders.empty:
-            st.warning("沒有取得任何大戶持股資料，籌碼副圖與訊號已略過。請在左側手動貼上資料，或填入 FinMind token。")
+            st.warning("自動取得大戶持股失敗（原因見上方「籌碼資料」說明），籌碼副圖與訊號已略過。可在左側手動貼上資料，或填入 FinMind token。")
             holders = None
         elif len(holders) < 6:
             st.info(
                 f"目前只有 {len(holders)} 週大戶持股資料，副圖與「4 週減持」判斷會很有限。"
-                "可手動貼上更多週的資料，或提供 FinMind token 取得完整歷史。"
+                "可手動貼上更多週的資料，或提供 FinMind token 補齊。"
             )
 
     effective_require = require_chips and holders is not None
