@@ -3,3 +3,9 @@
    numpy
    plotly
    twstock
+   streamlit
+   yfinance
+   pandas
+   numpy
+   matplotlib
+   requests
