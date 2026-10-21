@@ -25,9 +25,11 @@ jobs:
         env:
           # 把下面換成你自己的 app 網址，一行一個
           APP_URLS: |
-            https://YOUR-STOCK-APP.streamlit.app
-            https://YOUR-TW-SCANNER-APP.streamlit.app
-            https://YOUR-MONEY-APP.streamlit.app
+  https://kqdbalzj8hpf78ny4reedx.streamlit.app
+  https://suypb6ilvp8ggkhnq8zjkm.streamlit.app
+  https://（stock 的 streamlit_app.py 網址）
+  https://（tw-scanner 的 scanner_app.py 網址）
+  https://（money 另一個 app 的網址，如果也想保活）
         run: |
           cat > wake.py << 'EOF'
           import os
