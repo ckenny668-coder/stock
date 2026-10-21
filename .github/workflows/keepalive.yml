@@ -1,44 +1,62 @@
-name: keepalive
+name: Keep Streamlit Apps Awake
+
 on:
   schedule:
-    - cron: "0 */8 * * *"   # 每 8 小時開一次網頁
-  workflow_dispatch:
+    # 每 8 小時執行一次 (UTC)，低於 12 小時休眠門檻
+    - cron: "0 */8 * * *"
+  workflow_dispatch: # 可在 Actions 頁面手動執行測試
+
 jobs:
-  visit:
+  wake:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: |
+          python-version: "3.11"
+
+      - name: Install Playwright
+        run: |
           pip install playwright
           playwright install --with-deps chromium
-      - run: |
-          cat > visit.py <<'PYEOF'
+
+      - name: Visit apps (and wake them if asleep)
+        env:
+          # 把下面換成你自己的 app 網址，一行一個
+          APP_URLS: |
+            https://YOUR-STOCK-APP.streamlit.app
+            https://YOUR-TW-SCANNER-APP.streamlit.app
+            https://YOUR-MONEY-APP.streamlit.app
+        run: |
+          cat > wake.py << 'EOF'
+          import os
+          import re
           from playwright.sync_api import sync_playwright
-          URLS = [
-              "https://kqdbalzj8hpf78ny4reedx.streamlit.app",   # 台股量化
-              "https://suypb6ilvp8ggkhnq8zjkm.streamlit.app",   # 美股選股
-          ]
+
+          urls = [u.strip() for u in os.environ["APP_URLS"].splitlines() if u.strip()]
+
           with sync_playwright() as p:
-              b = p.chromium.launch()
-              for url in URLS:
+              browser = p.chromium.launch()
+              for url in urls:
+                  page = browser.new_page()
                   try:
-                      pg = b.new_page()
-                      pg.goto(url, timeout=90000)
-                      pg.wait_for_timeout(15000)
-                      woke = False
-                      for f in [pg] + pg.frames:
-                          btn = f.get_by_text("get this app back up")
-                          if btn.count():
-                              btn.first.click()
-                              woke = True
-                              break
-                      print(url, "-> woke app" if woke else "-> already awake")
-                      pg.wait_for_timeout(45000)
-                      pg.close()
+                      page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                      btn = page.get_by_role(
+                          "button", name=re.compile("get this app back up", re.I)
+                      )
+                      try:
+                          btn.wait_for(state="visible", timeout=10000)
+                          btn.click()
+                          print(f"[WOKE]  {url} 已按下喚醒按鈕")
+                          page.wait_for_timeout(45000)  # 等 app 重新啟動
+                      except Exception:
+                          print(f"[AWAKE] {url} 本來就是醒著的")
+                          page.wait_for_timeout(15000)  # 停留一下讓 websocket 連線，算作活動
                   except Exception as e:
-                      print(url, "-> error:", e)
-              b.close()
-          PYEOF
-          python visit.py
+                      print(f"[ERROR] {url}: {e}")
+                  finally:
+                      page.close()
+              browser.close()
+          EOF
+          python wake.py
