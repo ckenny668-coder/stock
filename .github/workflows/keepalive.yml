@@ -26,7 +26,9 @@ jobs:
           APP_URLS: |
             https://kqdbalzj8hpf78ny4reedx.streamlit.app
             https://suypb6ilvp8ggkhnq8zjkm.streamlit.app
-        run: |
+            https://tw-scanner-m3nscxerxag4b8rnevfnve.streamlit.app
+                        
+        run: | 
           cat > wake.py << 'EOF'
           import os
           import re
