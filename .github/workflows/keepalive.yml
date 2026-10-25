@@ -29,7 +29,11 @@ jobs:
             https://tw-scanner-m3nscxerxag4b8rnevfnve.streamlit.app
             https://buystock-g3j4erfjum9qi5vkscvmfz.streamlit.app
             https://bwftnadjyhybajqzwonusm.streamlit.app
-            https://ismzvlapvgiprennhvjjdo.streamlit.app/
+            https://ismzvlapvgiprennhvjjdo.streamlit.app
+            https://nat3yzman5avlif7giwypd.streamlit.app
+            https://atqk34ymc3zjqgd3dspbjg.streamlit.app
+
+            
         run: | 
           cat > wake.py << 'EOF'
           import os
