@@ -26,12 +26,12 @@ jobs:
           APP_URLS: |
             https://kqdbalzj8hpf78ny4reedx.streamlit.app
             https://suypb6ilvp8ggkhnq8zjkm.streamlit.app
-            https://tw-scanner-m3nscxerxag4b8rnevfnve.streamlit.app
             https://buystock-g3j4erfjum9qi5vkscvmfz.streamlit.app
             https://bwftnadjyhybajqzwonusm.streamlit.app
             https://ismzvlapvgiprennhvjjdo.streamlit.app
             https://nat3yzman5avlif7giwypd.streamlit.app
             https://atqk34ymc3zjqgd3dspbjg.streamlit.app
+            https://tw-scanner-8r46u55qwu7chipcpy4wnf.streamlit.app
 
             
         run: | 
