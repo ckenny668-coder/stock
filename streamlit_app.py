@@ -3,7 +3,7 @@ Streamlit App - Stan Weinstein 階段分析
 （Stage 3 頂部 + 耗盡缺口偵測 + 大戶持股籌碼）
 =====================================================================
 互動輸入：
-  - 個股代號（美股如 AAPL、台股如 2330.TW）
+  - 個股代號（美股如 AAPL；台股直接輸入編號如 2330、6488，自動判斷上市 .TW / 上櫃 .TWO）
   - 起訖日期
   - 分析參數（均線、延伸乖離率、跳空、爆量）
   - 台股籌碼：大戶持股比例（副圖）+ 籌碼訊號
@@ -89,6 +89,24 @@ def is_tw_ticker(ticker: str) -> bool:
 
 def stock_id_of(ticker: str) -> str:
     return ticker.split(".")[0].strip()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def resolve_tw_symbol(raw: str) -> str:
+    """台股只輸入編號即可：2303 → 2303.TW，6488 → 6488.TWO（自動判斷上市/上櫃）。
+    已含 .TW/.TWO 或美股代號（AAPL）則原樣使用。"""
+    s = raw.strip().upper().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    if not s or s.endswith((".TW", ".TWO")):
+        return s
+    if s.isalnum() and s[0].isdigit():          # 2303、6488、00878、00981A
+        for suffix in (".TW", ".TWO"):
+            try:
+                if not yf.Ticker(s + suffix).history(period="5d").empty:
+                    return s + suffix
+            except Exception:
+                pass
+        return s + ".TW"                         # 都查不到就維持 .TW，後面會顯示找不到資料
+    return s
 
 
 def _level_lower_bound(label: str):
@@ -490,11 +508,15 @@ st.caption("永遠不要買入延伸 — 找出過度延伸、耗盡缺口與 St
 
 with st.sidebar:
     st.header("查詢設定")
-    ticker = st.text_input(
+    raw_ticker = st.text_input(
         "個股代號",
-        value="AAPL",
-        help="美股直接輸入代號（如 AAPL、TSLA）；台股請加 .TW（如 2330.TW）；加 .TWO 為上櫃",
+        value="2303",
+        help="台股直接輸入編號即可（如 2330、6488），自動判斷上市 .TW／上櫃 .TWO；美股輸入英文代號（如 AAPL、TSLA）",
     )
+    ticker = resolve_tw_symbol(raw_ticker)
+    if ticker != raw_ticker.strip().upper():
+        st.caption(f"實際查詢代號：{ticker}")
+
     col_a, col_b = st.columns(2)
     with col_a:
         start_date = st.date_input(
@@ -558,7 +580,7 @@ if run_btn:
         df = load_price_data(ticker, start_date, end_date)
 
     if df.empty:
-        st.error(f"找不到 {ticker} 的資料，請確認代號是否正確（台股記得加 .TW / .TWO）。")
+        st.error(f"找不到 {ticker} 的資料，請確認代號是否正確。")
         st.stop()
 
     holders = None
